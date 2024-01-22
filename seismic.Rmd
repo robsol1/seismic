@@ -1,0 +1,284 @@
+---
+title: "Untitled"
+author: "Rob Solomon"
+date: "2023-11-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(readxl)
+library(tidyverse)
+library(caret)
+library(xgboost)
+```
+
+
+```{r }
+source("fns.R")
+data <- read_excel("data.xlsx")
+
+event_outcome <- data %>% 
+  filter(!is.na(Number)) %>% 
+  select(Event_id,Rockburst_intensity)
+
+
+use_data <- full_join(event_outcome, 
+                      data %>%
+                        select(ncol(data),3:(ncol(data)-1)))
+
+pred_cols <- names(use_data)[4:ncol(use_data)]
+```
+
+```{r}
+corr <- cor(use_data %>% 
+  select(pred_cols))
+corrplot(corr)
+corrdf <- data.frame(corr)
+```
+
+```{r}
+use_data %>% ggplot(aes(x=Microseismic_energy))+
+  geom_histogram()+
+  facet_wrap(facets = vars(Rockburst_intensity),ncol = 1,scales = "free_y")
+```
+
+
+```{r }
+long_data <- use_data %>% 
+  pivot_longer(cols = pred_cols)
+long_data %>% ggplot(aes(x=value))+
+  geom_histogram()+
+  facet_grid(cols=vars(name),rows = vars(Rockburst_intensity),scales="free")
+```
+
+```{r}
+i <- 1
+
+plot <- use_data %>% 
+  filter(Event_id==i) %>% 
+  
+
+plot %>% ggplot(aes(x=Row_id,y=value))+
+  geom_point()+
+  facet_wrap(vars(name),scales = "free")
+```
+```{r}
+
+```
+
+
+```{r }
+summary_data <- use_data %>% 
+  group_by(Event_id,Rockburst_intensity) %>% 
+  summarise(Microseismic_energy=mean(Microseismic_energy),
+           Seismic_moment=mean(Seismic_moment),
+           Apparent_volume=mean(Apparent_volume),
+           Apparent_stress=mean(Apparent_stress),
+           Stress_drop=mean(Stress_drop)
+  ) 
+# %>% 
+#   mutate(Rockburst_intensity=as.factor(Rockburst_intensity))
+summary_data$Rockburst_intensity <-
+  factor(summary_data$Rockburst_intensity,
+         levels = c("No", "Low", "Moderate"))
+summary_data %>% ggplot(aes(x=Microseismic_energy))+
+  geom_histogram()+
+  facet_wrap(facets = vars(Rockburst_intensity),ncol = 1,scales = "free_y")
+```
+```{r }
+summary_data %>% ggplot(aes(x=Seismic_moment))+
+  geom_histogram()+
+  facet_wrap(facets = vars(Rockburst_intensity),ncol = 1,scales = "free_y")
+```
+```{r}
+
+summary_data %>% ggplot(aes(x=Apparent_volume))+
+  geom_histogram()+
+  facet_wrap(facets = vars(Rockburst_intensity),ncol = 1,scales = "free_y")
+```
+```{r}
+
+summary_data %>% ggplot(aes(x=Apparent_stress))+
+  geom_histogram()+
+  facet_wrap(facets = vars(Rockburst_intensity),ncol = 1,scales = "free_y")
+```
+```{r}
+
+summary_data %>% ggplot(aes(x=Stress_drop))+
+  geom_histogram()+
+  facet_wrap(facets = vars(Rockburst_intensity),ncol = 1,scales = "free_y")
+```
+```{r }
+scaled_data <- summary_data %>% 
+  select(pred_cols) %>% 
+  scale()
+
+pca <- princomp(scaled_data)
+
+summary(pca)
+
+
+princomp_mod <- data.frame(predict(pca,scaled_data))
+princomp_mod <- cbind(summary_data,princomp_mod)
+
+princomp_mod %>% ggplot(aes(x=Comp.1,y=Comp.2,colour=Rockburst_intensity))+
+  geom_point()
+
+```
+```{r}
+nclust <- n_clusters(summary_data,colnames = pred_cols)
+nclust$wss_plot
+nclust$improve.plot
+
+```
+
+## Pick n=3
+
+```{r}
+init_cluster <-
+  kmeans_cluster(
+    df = summary_data,
+    clusters = 3,
+    cluster_col_names = pred_cols,
+    cluster_name = "cluster",
+    seed = 123
+  )
+clustered_data <- full_join(init_cluster$cluster_table,princomp_mod)
+clustered_data %>% ggplot(aes(x=Comp.1,y=Comp.2,colour=Rockburst_intensity))+
+  geom_point()+
+  facet_wrap(vars(cluster),ncol = 2)
+  
+fviz_cluster(init_cluster$cluster,scaled_data)
+```
+
+```{r}
+# Create a data set with only numeric data
+
+
+set.seed(123456)
+#modset <- clean[, sapply(clean, is.numeric)]
+modset <- summary_data %>%  ungroup() %>% select(-Event_id)
+n <- 1
+#modset <- iris
+parts = createDataPartition(modset$Rockburst_intensity, p = 0.8, list = F)
+#parts = createDataPartition(modset$Species, p = 0.8, list = F)
+train = modset[parts, ]
+test = modset[-parts, ]
+
+
+
+X_train = data.matrix(train[,-n])                  # independent variables for train
+Train_labels <- train$Rockburst_intensity # dependent variables for train
+                            
+X_test = data.matrix(test[,-n])                    # independent variables for test
+Test_labels = test$Rockburst_intensity                               # dependent variables for test
+
+# # convert the train and test data into xgboost matrix type.
+xgboost_train = xgb.DMatrix(data=X_train, label=Train_labels)
+# xgboost_test = xgb.DMatrix(data=X_test, label=Test_labels)
+fitControl <- trainControl(
+    method = 'cv',                   # k-fold cross validation
+    number = 5,                      # number of folds
+    savePredictions = 'final',       # saves predictions for optimal tuning parameter
+    classProbs = T                   # should class probabilities be returned
+) 
+
+
+
+Start <- Sys.time()
+# Train the model using MARS
+model_xgbDART = train(
+  Rockburst_intensity ~ .,
+  data = train,
+  method = 'xgbDART',
+  tuneLength = 5,
+  trControl = fitControl,
+  verbose = F
+)
+best_tune <- model_xgbDART$bestTune
+final_model <- model_xgbDART$finalModel
+pred <- model_xgbDART$pred
+model <- model_xgbDART$terms
+
+
+runtime_NN = as.numeric(difftime(Sys.time(), Start, units = 'secs'))
+
+print(paste0("Runtime ",runtime_NN,"sec"))
+plot(model_xgbDART)
+saveRDS(model_xgbDART$finalModel,"model_xgbDART_finalModel.rda")
+
+
+#########################
+
+fit_classify <- function(model,df,pred_cols,levels){
+pred <- predict(model,
+                      as.matrix(df %>% select(pred_cols))
+                      )
+fit <-
+  data.frame(
+    seq = rep(1:nrow(df), each = length(levels)),
+    fit = pred,
+    resp = rep(levels, times = nrow(df))
+  )
+wide <- fit %>% 
+  pivot_wider(names_from = resp,values_from = fit)
+
+summary <- fit %>% group_by(seq) %>% 
+  summarise(fit=max(fit))
+df <- df %>% select(pred_cols,!pred_cols)
+fit <- inner_join(summary,fit,by=join_by(seq,fit))
+fit <- inner_join(wide,fit)
+fit <- cbind(df,fit)
+fit$resp=factor(fit$resp,levels=levels)
+fit
+}
+fit_train <-
+  fit_classify(
+    model = model_xgbDART$finalModel,
+    df = train,
+    pred_cols = pred_cols,
+    levels = levels(train$Rockburst_intensity)
+  )
+conf_mat = confusionMatrix(data = train$resp,
+                           reference = fit_train$Rockburst_intensity)
+read_mod <- readRDS("model_xgbDART_finalModel.rda")
+fit_test <-
+  fit_classify(
+    model = read_mod,
+    df = test,
+    pred_cols = pred_cols,
+    levels = levels(train$Rockburst_intensity)
+  )
+
+
+conf_mat = confusionMatrix(data = fit_test$resp,
+                           reference = fit_test$Rockburst_intensity)
+
+#########################
+
+
+
+test_res <- cbind(pred,test_res)
+#results <- model_xgbDART$results
+
+# Calculating R2 for test set
+mod.test$Predict <- predict(nnmod,mod.test)
+mod.test$Resid <- mod.test$avg.efh.speed-mod.test$Predict
+avg <-  sum(mod.test$avg.efh.speed) / nrow(mod.test)
+ss <- sum(mod.test$Resid * mod.test$Resid)
+ss2 <- sum((mod.test$avg.efh.speed - avg) * (mod.test$avg.efh.speed - avg))
+R2Test_NN <- 1 - ss / ss2
+
+summary <- rbind(summary,
+                 data.frame(
+                   model = 'NN',
+                   Compute_Time = runtime_NN,
+                   R2 = R2Test_NN
+                 ))
+coeficients.nnmod <- nnmod$result.matrix
+963/3
+```
+
